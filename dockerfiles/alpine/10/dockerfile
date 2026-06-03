@@ -1,0 +1,195 @@
+# syntax=docker/dockerfile:1
+#
+# yourcompanyname .NET 10 ASP.NET production base (Alpine)
+#
+# Starts from Microsoft's official ASP.NET 10 Alpine image and aligns it with the
+# Ubuntu variant: production ASP.NET environment, ICU-based globalization (icu-data-full,
+# icu-libs), server GC and heap limit, curl, tzdata, CA certificates, and a non-root
+# `yourcompanyname` user (UID/GID 7777) with home `/app`.
+#
+# Optional diagnostic CLIs (dotnet-debug, dotnet-gcdump, dotnet-trace) under `/app/app-tools`
+# when built with target `final-diagnostics` (default).
+#
+# Build targets:
+#   final-diagnostics — includes SDK tools stage (default `docker build` / CI when tools enabled)
+#   final             — lean runtime only (no SDK stage in the build graph)
+#
+# Build examples (run from repository root; syntax validated with BuildKit):
+#
+# Lean production (no diagnostic tools):
+#   docker build -f dockerfiles/alpine/10/dockerfile \
+#     --target final \
+#     --build-arg INSTALL_DIAGNOSTIC_TOOLS=false \
+#     -t yourcompanyname/alpine-net-10:lean \
+#     dockerfiles/alpine/10
+#
+# With diagnostic tools (default):
+#   docker build -f dockerfiles/alpine/10/dockerfile \
+#     --target final-diagnostics \
+#     --build-arg INSTALL_DIAGNOSTIC_TOOLS=true \
+#     -t yourcompanyname/alpine-net-10:latest \
+#     dockerfiles/alpine/10
+#
+# Result: same operational contract as the Ubuntu base—8080/8443, `/app` for the runtime
+# user, `/app/.info/` snapshots (dotnet --info, os-release, optional tools snapshot), and
+# `/app/app-data`—on musl Alpine instead of glibc Ubuntu.
+
+ARG DOTNET_VERSION=10.0
+ARG INSTALL_DIAGNOSTIC_TOOLS=true
+# Target selection: use --target final|final-diagnostics (CI sets target from INSTALL_DIAGNOSTIC_TOOLS env).
+
+# === Runtime base (no SDK dependency) ===
+FROM mcr.microsoft.com/dotnet/aspnet:${DOTNET_VERSION}-alpine AS aspnet-base
+ARG DOTNET_VERSION
+
+ENV ASPNETCORE_ENVIRONMENT="Production"
+
+LABEL yourcompanyname.Maintainer="yourcompanyname, inc" \
+    yourcompanyname.BaseImage="alpine ${DOTNET_VERSION}" \
+    yourcompanyname.Disclaimer="yourcompanyname - Production Build" \
+    org.opencontainers.image.description="yourcompanyname Devops Base Image for .NET" \
+    org.opencontainers.image.licenses="MIT"
+
+# Expose standard unprivileged container ports for web applications:
+# - 8080: Default port for HTTP traffic
+# - 8443: Default port for HTTPS traffic (if configured)
+EXPOSE 8080 8443
+
+# ASPNETCORE_URLS — Kestrel listens for HTTP on all interfaces, port 8080 (matches EXPOSE above).
+# DOTNET_RUNNING_IN_CONTAINER — tells the runtime it is in a container (container-aware defaults where applicable).
+# DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false — use ICU for culture-aware APIs; requires icu-data-full and icu-libs below.
+# LANG/LC_ALL — locale for ICU-backed globalization (see dotnet-docker enable-globalization sample).
+ENV ASPNETCORE_HTTP_PORTS=8080 \
+    ASPNETCORE_URLS=http://+:8080 \
+    DOTNET_RUNNING_IN_CONTAINER=true \
+    DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false \
+    LC_ALL=en_US.UTF-8 \
+    LANG=en_US.UTF-8
+
+# DOTNET_gcServer=1 — server GC (throughput-oriented on multi-core hosts; typical for ASP.NET in containers).
+# DOTNET_GCHeapHardLimit — maximum managed GC heap in bytes (~3 GiB here) to bound memory use in containers.
+ENV DOTNET_gcServer=1 \
+    DOTNET_GCHeapHardLimit=3221225472
+
+# Update package index, upgrade system packages, and install dependencies
+# - curl           : HTTP/HTTPS client (health checks, outbound calls, scripting inside the image).
+# - icu-data-full  : full ICU locale data (required for non-English cultures on Alpine 3.16+).
+# - icu-libs       : ICU shared libraries; pairs with DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false.
+# - tzdata         : IANA time zone database for `TimeZoneInfo` and local-time conversions.
+# - ca-certificates: system CA bundle; `update-ca-certificates` refreshes trust for TLS (HTTPS, NuGet, APIs).
+# adduser/addgroup below use the ASP.NET Alpine base image (shadow/busybox); no extra apk package required.
+RUN apk update && \
+    apk upgrade --no-cache && \
+    apk add --no-cache \
+    curl \
+    icu-data-full \
+    icu-libs \
+    tzdata \
+    ca-certificates \
+    && update-ca-certificates \
+    && rm -rf /var/cache/apk/*
+
+# Define environment variables for the non-root application user and group.
+# These ensure consistent IDs (7777) across the platform for permission matching and security.
+ENV USERGROUP="yourcompanyname" \
+    GID="7777" \
+    USER="yourcompanyname" \
+    UID="7777" \
+    USER_HOME="/app"
+
+# create a group: yourcompanyname with gid:7777
+RUN addgroup --gid ${GID} ${USERGROUP}
+
+# Create the dedicated execution user without interactive login capabilities or passwords
+RUN adduser \
+    --disabled-password \
+    --gecos "" \
+    --home "${USER_HOME}" \
+    --uid "${UID}" \
+    --ingroup "${USERGROUP}" \
+    "${USER}"
+
+ARG INFO_DIR=/app/.info/
+
+# create the empty .info directory (using .empty structure)
+COPY --chown=yourcompanyname:yourcompanyname [".empty", "${INFO_DIR}"]
+
+# Data (writable app state; same path as Ubuntu and Ubuntu Chiseled bases)
+COPY --chown=yourcompanyname:yourcompanyname [".empty", "/app/app-data"]
+
+# Runtime metadata snapshots (owned by yourcompanyname)
+RUN <<EOT
+  dotnet --info > ${INFO_DIR}dotnet.txt
+  cat /etc/os-release > ${INFO_DIR}linux.txt
+  chown -R ${USER}:${USERGROUP} ${INFO_DIR}
+EOT
+
+# Ensure the application directory and all subdirectories are safely readable and executable,
+# enforcing proper access controls for the non-root application user.
+RUN chmod -R 755 /app
+
+# Set the default working directory for the runtime container
+WORKDIR /app
+
+# APP_UID — ASP.NET Core container convention; matches yourcompanyname (7777).
+ENV APP_UID=7777
+
+# Base-image check: ASP.NET runtime is present. Application images MUST override with HTTP/gRPC
+# liveness, for example:
+#   HEALTHCHECK CMD curl -f http://127.0.0.1:8080/health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD dotnet --list-runtimes | grep -q "Microsoft.AspNetCore.App" || exit 1
+
+# Switch to the non-root application user (inherited by target `final`; reset in `final-diagnostics` after root COPY/RUN)
+USER yourcompanyname
+
+# === Stage: optional diagnostic tools (SDK; only when building target final-diagnostics) ===
+FROM mcr.microsoft.com/dotnet/sdk:${DOTNET_VERSION}-alpine AS tools-env
+
+# Install dotnet diagnostic CLIs into /tools for copy into the runtime image
+RUN mkdir -p /tools && \
+    dotnet tool install dotnet-debug --tool-path /tools && \
+    dotnet tool install dotnet-gcdump --tool-path /tools && \
+    dotnet tool install dotnet-trace --tool-path /tools
+
+# === Lean target: no SDK stage in the build graph ===
+FROM aspnet-base AS final
+
+# Record that diagnostic tools were omitted (runs as yourcompanyname — inherited from aspnet-base)
+RUN <<EOT
+  echo "# Diagnostic tools not installed (build target: final)" > /app/.info/tools.txt
+EOT
+
+# === Diagnostics target (default CI publish when INSTALL_DIAGNOSTIC_TOOLS=true) ===
+FROM aspnet-base AS final-diagnostics
+
+# COPY/RUN require root; aspnet-base ends as yourcompanyname
+USER root
+
+# Diagnostic CLI tools from the SDK stage (dotnet-debug, dotnet-gcdump, dotnet-trace)
+COPY --chown=yourcompanyname:yourcompanyname --from=tools-env /tools /app/app-tools
+
+# Snapshot diagnostic tool versions; set permissions on /app (including tool binaries)
+RUN <<EOT
+  {
+    echo "# Diagnostic dotnet tools (build-time snapshot)"
+    echo "# install path: /app/app-tools"
+    echo ""
+    if ! dotnet tool list --tool-path /app/app-tools; then
+      for cmd in dotnet-debug dotnet-gcdump dotnet-trace; do
+        if [ -x "/app/app-tools/${cmd}" ]; then
+          echo "--- ${cmd} ---"
+          /app/app-tools/${cmd} --version 2>&1 || echo "version: unknown"
+        fi
+      done
+    fi
+  } > /app/.info/tools.txt
+  chown -R ${USER}:${USERGROUP} /app/.info
+  chmod -R 755 /app
+EOT
+
+# Prepend diagnostic tool directory for in-container troubleshooting
+ENV PATH="/app/app-tools:${PATH}"
+
+# Switch back to the non-root application user (only USER in diagnostics target)
+USER yourcompanyname
