@@ -1,4 +1,4 @@
-# yourcompanyname.DevOps.BaseImages
+# YourCompanyName-DevOps-BaseImages
 
 This repository is mostly documentation. It explains how to choose Microsoft's official .NET 10 runtime bases (Ubuntu Noble, Ubuntu Chiseled, Alpine) and how this repo's optional yourcompanyname wrapper images fit on top.
 
