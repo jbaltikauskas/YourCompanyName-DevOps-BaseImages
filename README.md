@@ -1,4 +1,4 @@
-# YourCompanyName-DevOps-BaseImages
+# yourcompanyname.DevOps.BaseImages
 
 This repository is mostly documentation. It explains how to choose Microsoft's official .NET 10 runtime bases (Ubuntu Noble, Ubuntu Chiseled, Alpine) and how this repo's optional yourcompanyname wrapper images fit on top.
 
@@ -12,7 +12,7 @@ Treat the contents as guidelines, not a mandate. The goal is to give teams a cle
 
 **Platform and DevOps.** Catalog of images is in [The images at a glance](#the-images-at-a-glance) and [Image size comparison](#image-size-comparison). Build and CI patterns are below; published images live in [Published images (GHCR)](#published-images-ghcr).
 
-**Security and compliance.** Chiseled reduces surface area (no shell, no package manager in the runtime) at the cost of more involved break-glass debugging. Alpine vs glibc affects supply chain and compatibility, not just size. The yourcompanyname **`ubuntu-net-10`** and **`alpine-net-10`** images can include optional diagnostic CLIs at build time — use `--target final` for lean production; see [Ubuntu and Alpine: optional diagnostic tools](#ubuntu-and-alpine-optional-diagnostic-tools). Patching follows whatever upstream Microsoft and distro lifecycles you pin to. This README does not replace your org's image allow-list or tagging policy.
+**Security and compliance.** Chiseled reduces surface area (no shell, no package manager in the runtime) at the cost of more involved break-glass debugging. Alpine vs glibc affects supply chain and compatibility, not just size. The yourcompanyname `**ubuntu-net-10`** and `**alpine-net-10**` images can include optional diagnostic CLIs at build time — use `--target final` for lean production; see [Ubuntu and Alpine: optional diagnostic tools](#ubuntu-and-alpine-optional-diagnostic-tools). Patching follows whatever upstream Microsoft and distro lifecycles you pin to. This README does not replace your org's image allow-list or tagging policy.
 
 ---
 
@@ -76,6 +76,12 @@ When in doubt between Noble and Chiseled: pick Noble when you need `apt`, a shel
 Ubuntu Chiseled (`*-noble-chiseled`, `*-noble-chiseled-extra`) is a distroless-style variant built by Canonical in partnership with Microsoft using the Chisel tool. The image contains only the slice of Ubuntu .NET actually needs: no shell, no package manager, non-root by default, and far fewer moving parts than the full Noble image. See the [official overview](https://github.com/dotnet/dotnet-docker/blob/main/documentation/ubuntu-chiseled.md).
 
 There is no Chiseled SDK image. You publish with `mcr.microsoft.com/dotnet/sdk:*-noble` and run on a Chiseled runtime tag.
+
+### Security-critical services, including AuthN/AuthZ
+
+Authentication and authorization services are an ideal fit for Ubuntu Chiseled because they are high-value targets and benefit directly from a stripped runtime surface. If an attacker reaches an application-level vulnerability, the runtime image gives them no shell, no `apt`, and very little OS tooling to pivot with. The small package set also keeps scanner noise low, which makes security review and compliance evidence easier to reason about.
+
+Do not treat AuthN/AuthZ as the only valid use case. Chiseled is also a strong default for general ASP.NET Core APIs, production microservice fleets, and workloads deployed into environments with strict hardening or low-CVE expectations. Choose Chiseled because the operational profile fits: minimal runtime, non-root execution, small image size, and break-glass debugging handled through sidecars, ephemeral pods, CI diagnostics, or platform tooling.
 
 **Strengths**
 
@@ -187,6 +193,9 @@ Fix 3 is the path of least resistance in most enterprise environments.
 ## Choosing a base image
 
 ```text
+AuthN/AuthZ or other security-critical service
+  -> noble-chiseled — excellent fit, but not the only valid Chiseled use case
+
 General-purpose ASP.NET Core API
   -> noble-chiseled — best balance of size, security, and compatibility
 
@@ -214,6 +223,7 @@ Self-contained single-binary publish
 
 Rough rule of thumb across teams:
 
+- Pick by operational requirements, not by business domain alone. Auth services are a great Chiseled example; they are not the boundary.
 - Internal tools and prototypes where convenience and quick troubleshooting matter most: **full Noble**.
 - Microservices with no native dependencies and a real interest in tiny images: **Alpine**.
 - Anything deployed at scale into an environment with strict compliance or zero-CVE expectations: **Chiseled** (with `-extra` if you need ICU).
@@ -277,7 +287,7 @@ Upstream `mcr.microsoft.com/dotnet/aspnet:10.0-noble` and friends are Microsoft'
 
 ---
 
-## Multi-stage: stock SDK + yourcompanyname runtime
+## Multi-stage: stock SDK + YourCompanyName runtime
 
 Publish with `mcr.microsoft.com/dotnet/sdk:10.0-noble`, then run the published output on `ghcr.io/jbaltikauskas/ubuntu-net-10` so local builds and CI pick up the same updated packages, environment, GC and heap settings, listening ports, ICU data, and `/app` layout that production runs.
 
@@ -286,22 +296,33 @@ Stock Microsoft runtime, for comparison:
 ```dockerfile
 FROM mcr.microsoft.com/dotnet/sdk:10.0-noble AS build
 WORKDIR /src
+
+COPY Directory.Build.props Directory.Packages.props NuGet.config ./
+COPY src/CompanyName.Platform.Api/CompanyName.Platform.Api.csproj src/CompanyName.Platform.Api/
+COPY src/CompanyName.Platform.Application/CompanyName.Platform.Application.csproj src/CompanyName.Platform.Application/
+COPY src/CompanyName.Platform.Domain/CompanyName.Platform.Domain.csproj src/CompanyName.Platform.Domain/
+COPY src/CompanyName.Platform.Infrastructure/CompanyName.Platform.Infrastructure.csproj src/CompanyName.Platform.Infrastructure/
+RUN dotnet restore src/CompanyName.Platform.Api/CompanyName.Platform.Api.csproj
+
 COPY . .
-RUN dotnet publish -c Release -o /app
+RUN dotnet publish src/CompanyName.Platform.Api/CompanyName.Platform.Api.csproj \
+  --configuration Release \
+  --no-restore \
+  --output /app
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble AS runtime
 WORKDIR /app
 COPY --from=build /app .
-ENTRYPOINT ["dotnet", "MyApp.dll"]
+ENTRYPOINT ["dotnet", "YourCompanyName.Platform.Api.dll"]
 ```
 
 yourcompanyname-built runtime — reuse the same `build` stage and swap only the final image:
 
 ```dockerfile
 FROM ghcr.io/jbaltikauskas/ubuntu-net-10 AS runtime
-WORKDIR /app
+
 COPY --chown=7777:7777 --from=build /app .
-ENTRYPOINT ["dotnet", "MyApp.dll"]
+ENTRYPOINT ["dotnet", "YourCompanyName.Platform.Api.dll"]
 ```
 
 Swap `ubuntu-net-10` for `ubuntu-chiseled-net-10` or `alpine-net-10` to pick a different production base. The contract on `/app`, the listening port, and the runtime user stays the same across those three.
@@ -322,7 +343,7 @@ For Ubuntu and Alpine production, prefer `--target final` when building `ubuntu-
 
 ```bash
 git clone <your-repo-url>
-cd yourcompanyname.DevOps.BaseImages
+cd YourCompanyName-DevOps-BaseImages
 ```
 
 ### Local build
@@ -391,9 +412,9 @@ Published images are signed with [cosign](https://github.com/sigstore/cosign) vi
 
 ## Troubleshooting
 
-**`docker buildx` not available.** Install or enable Docker Buildx in your Docker installation. Older Docker installs may need an explicit `docker buildx install` or a newer Docker Desktop.
+`**docker buildx` not available.** Install or enable Docker Buildx in your Docker installation. Older Docker installs may need an explicit `docker buildx install` or a newer Docker Desktop.
 
-**Cannot pull `mcr.microsoft.com/dotnet/aspnet:10.0-*`.** Check outbound network access to `mcr.microsoft.com` and that the Docker daemon is running. Corporate proxies sometimes need to be added to the Docker engine config.
+**Cannot pull `mcr.microsoft.com/dotnet/aspnet:10.0-`*.** Check outbound network access to `mcr.microsoft.com` and that the Docker daemon is running. Corporate proxies sometimes need to be added to the Docker engine config.
 
 **GHCR push or auth errors.** Authenticate Docker to GHCR (`docker login ghcr.io`) and confirm the token has `write:packages`. The workflow uses `GITHUB_TOKEN` with `packages: write`, which requires the package to allow the repo as a source.
 
