@@ -1,8 +1,58 @@
 # YourCompanyName-DevOps-BaseImages
 
-This repository is mostly documentation. It explains how to choose Microsoft's official .NET 10 runtime bases (Ubuntu Noble, Ubuntu Chiseled, Alpine) and how this repo's optional yourcompanyname wrapper images fit on top.
+This repository shows how to build production-ready .NET container images.
 
-Treat the contents as guidelines, not a mandate. The goal is to give teams a clear starting point for picking a base image and to publish a small set of hardened wrapper images that downstream services can build on. Align everything with your own team's standards, registry policy, and risk posture.
+Microsoft's app Dockerfile samples typically use a multi-stage build that starts the runtime stage straight from an official image:
+
+```dockerfile
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS base
+USER app
+WORKDIR /app
+EXPOSE 8080
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+ARG BUILD_CONFIGURATION=Release
+WORKDIR /src
+COPY ["MyApp/MyApp.csproj", "MyApp/"]
+RUN dotnet restore "./MyApp/MyApp.csproj"
+COPY . .
+WORKDIR "/src/MyApp"
+RUN dotnet build "./MyApp.csproj" -c $BUILD_CONFIGURATION -o /app/build
+
+FROM build AS publish
+ARG BUILD_CONFIGURATION=Release
+RUN dotnet publish "./MyApp.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
+
+FROM base AS final
+WORKDIR /app
+COPY --from=publish /app/publish .
+ENTRYPOINT ["dotnet", "MyApp.dll"]
+```
+
+That skips the layer most organizations need first: a **company base image** built on top of Microsoft's runtime (hardening, users, env defaults, CA certs, optional diagnostics). This repo documents how to choose among Microsoft's .NET 10 bases (Ubuntu Noble, Ubuntu Chiseled, Alpine) and provides the wrapper Dockerfiles that produce that company base — for example `dockerfiles/alpine/10/dockerfile`. Application Dockerfiles should then look like this instead:
+
+```dockerfile
+FROM yourcompanyname/alpine-net-10:latest AS base
+WORKDIR /app
+EXPOSE 8080
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+# ... (build and publish stages remain the same, using Microsoft's SDK) ...
+ARG BUILD_CONFIGURATION=Release
+WORKDIR /src
+COPY ["MyApp/MyApp.csproj", "MyApp/"]
+RUN dotnet restore "./MyApp/MyApp.csproj"
+COPY . .
+WORKDIR "/src/MyApp"
+RUN dotnet publish "./MyApp.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
+
+FROM base AS final
+WORKDIR /app
+COPY --from=publish /app/publish .
+ENTRYPOINT ["dotnet", "MyApp.dll"]
+```
+
+Treat the contents as guidelines, not a mandate. Align with your team's standards, registry policy, and risk posture.
 
 ---
 
